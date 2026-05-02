@@ -120,6 +120,8 @@ app.use(session({
 // for the "directory-like" URLs. Static still serves CSS/JS/images normally.
 app.get('/add-attendance', (req, res) =>
   res.sendFile(path.join(__dirname, 'public', 'add-attendance.html')));
+app.get('/update-doj', (req, res) =>
+  res.sendFile(path.join(__dirname, 'public', 'update-doj.html')));
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ---------- auth ----------
@@ -390,6 +392,93 @@ app.post('/api/attendance/create-batch', requireRole('admin','it-team'), async (
     await conn.rollback();
     res.status(400).json({ error: err.message });
   } finally { conn.release(); }
+});
+
+// ---------- employees grid (DOJ update) ----------
+app.get('/api/employees', requireRole('admin','it-team'), async (req, res) => {
+  try {
+    const { q = '', limit = 5000, offset = 0 } = req.query;
+    const where = ['deleted_at IS NULL']; const params = [];
+    if (q) {
+      where.push('(emp_code LIKE ? OR first_name LIKE ? OR last_name LIKE ?)');
+      params.push(`%${q}%`, `%${q}%`, `%${q}%`);
+    }
+    const [rows] = await pool.query(
+      `SELECT id, emp_code,
+              CONCAT_WS(' ', first_name, last_name) AS emp_name,
+              department,
+              DATE_FORMAT(doj, '%Y-%m-%d') AS doj
+       FROM employees_dp WHERE ${where.join(' AND ')}
+       ORDER BY emp_code ASC LIMIT ? OFFSET ?`,
+      [...params, +limit, +offset]);
+    res.json({ rows });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Batch DOJ update — single transaction, audited in emp_audit_log.
+app.post('/api/employees/save-doj', requireRole('admin','it-team'), async (req, res) => {
+  const edits = Array.isArray(req.body?.edits) ? req.body.edits : [];
+  if (!edits.length) return res.json({ ok: true, applied: 0 });
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const user = req.session.user;
+    const batchId = crypto.randomUUID();
+    let applied = 0;
+    for (const e of edits) {
+      const id = +e.id;
+      if (!id) throw new Error('Missing employee id');
+      const newVal = e.newValue ? String(e.newValue).trim() : null;
+      if (newVal && !/^\d{4}-\d{2}-\d{2}$/.test(newVal))
+        throw new Error(`Bad DOJ format on emp id ${id} — expected YYYY-MM-DD`);
+
+      const [[cur]] = await conn.query(
+        `SELECT emp_code, DATE_FORMAT(doj,'%Y-%m-%d') AS doj
+         FROM employees_dp WHERE id=? AND deleted_at IS NULL FOR UPDATE`, [id]);
+      if (!cur) throw new Error(`Employee id ${id} not found`);
+      if (cur.doj === newVal) continue; // no-op
+
+      const [r] = await conn.query(
+        `UPDATE employees_dp SET doj=? WHERE id=?`, [newVal, id]);
+      if (r.affectedRows) {
+        applied++;
+        await conn.query(
+          `INSERT INTO emp_audit_log (emp_id, emp_code, field, old_value, new_value, edited_by, edited_by_name, batch_id)
+           VALUES (?,?,?,?,?,?,?,?)`,
+          [id, cur.emp_code, 'doj', cur.doj, newVal, user.id, user.full_name || user.username, batchId]);
+      }
+    }
+    await conn.commit();
+    res.json({ ok: true, applied, batchId });
+  } catch (err) {
+    await conn.rollback();
+    res.status(400).json({ error: err.message });
+  } finally { conn.release(); }
+});
+
+// Employee audit log + rollback (admin only for rollback).
+app.get('/api/employees/audit', requireRole('admin','it-team'), async (req, res) => {
+  const { limit = 500 } = req.query;
+  const [rows] = await pool.query(
+    `SELECT * FROM emp_audit_log ORDER BY edited_at DESC LIMIT ?`, [+limit]);
+  res.json({ rows });
+});
+app.post('/api/employees/audit/rollback', requireRole('admin'), async (req, res) => {
+  const { batchId } = req.body || {};
+  if (!batchId) return res.status(400).json({ error: 'batchId required' });
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const [logs] = await conn.query(
+      `SELECT * FROM emp_audit_log WHERE batch_id=? AND rolled_back=0 ORDER BY id DESC`, [batchId]);
+    for (const l of logs) {
+      await conn.query(`UPDATE employees_dp SET \`${l.field}\`=? WHERE id=?`, [l.old_value, l.emp_id]);
+      await conn.query(`UPDATE emp_audit_log SET rolled_back=1 WHERE id=?`, [l.id]);
+    }
+    await conn.commit();
+    res.json({ ok: true, reverted: logs.length });
+  } catch (err) { await conn.rollback(); res.status(500).json({ error: err.message }); }
+  finally { conn.release(); }
 });
 
 // Resolve emp_code → name (or 404). Used by the add-attendance grid for inline name display.

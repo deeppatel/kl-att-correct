@@ -23,7 +23,8 @@ const nameCache = new Map(); // emp_code -> name | null (null = looked up, doesn
   $('#topbar').hidden = false;
   $('#grid').hidden = false;
   $('#who').textContent = `${user.full_name || user.username} (${user.role})`;
-  if (user.role === 'admin') $('#mainLink').hidden = false;
+  // it-team can't reach the correction grid — hide the link
+  if (user.role !== 'admin') document.querySelector('[data-nav="grid"]').hidden = true;
   buildGrid();
 })();
 

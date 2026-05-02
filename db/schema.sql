@@ -55,6 +55,25 @@ CREATE TABLE IF NOT EXISTS att_audit_log (
   INDEX idx_edited_at (edited_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- 2b. Per-employee audit log (separate from att_audit_log so attendance and
+--     employee-master changes stay in their own histories).
+CREATE TABLE IF NOT EXISTS emp_audit_log (
+  id             BIGINT AUTO_INCREMENT PRIMARY KEY,
+  emp_id         BIGINT       NOT NULL,             -- employees_dp.id
+  emp_code       VARCHAR(20),
+  field          VARCHAR(64)  NOT NULL,             -- e.g. doj
+  old_value      VARCHAR(64),
+  new_value      VARCHAR(64),
+  edited_by      INT          NOT NULL,
+  edited_by_name VARCHAR(128),
+  edited_at      TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  batch_id       VARCHAR(40)  NOT NULL,
+  rolled_back    TINYINT(1)   NOT NULL DEFAULT 0,
+  INDEX idx_emp       (emp_id),
+  INDEX idx_batch     (batch_id),
+  INDEX idx_edited_at (edited_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 -- 3. Add remarks to attendance_data, only if not already there.
 SET @col_exists := (
   SELECT COUNT(*) FROM information_schema.columns
@@ -71,8 +90,9 @@ PREPARE s FROM @ddl; EXECUTE s; DEALLOCATE PREPARE s;
 -- Required app DB-user grants (run as a privileged user once):
 --
 --   GRANT SELECT, INSERT, UPDATE                 ON dp_sync.attendance_data TO 'att_app'@'%';
---   GRANT SELECT                                 ON dp_sync.employees_dp    TO 'att_app'@'%';
+--   GRANT SELECT, UPDATE                         ON dp_sync.employees_dp    TO 'att_app'@'%';
 --   GRANT SELECT, INSERT, UPDATE, DELETE         ON dp_sync.att_users       TO 'att_app'@'%';
 --   GRANT SELECT, INSERT, UPDATE                 ON dp_sync.att_audit_log   TO 'att_app'@'%';
+--   GRANT SELECT, INSERT, UPDATE                 ON dp_sync.emp_audit_log   TO 'att_app'@'%';
 --   FLUSH PRIVILEGES;
 -- ============================================================

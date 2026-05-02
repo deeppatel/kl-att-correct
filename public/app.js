@@ -69,6 +69,11 @@ async function init() {
   $('#topbar').hidden = false;
   $('#grid').hidden = false;
   $('#who').textContent = `${user.full_name || user.username} (${user.role})`;
+  // Only admin sees the IT-Ops pages from the correction grid; viewers/editors don't.
+  if (user.role !== 'admin') {
+    document.querySelector('[data-nav="add"]').hidden = true;
+    document.querySelector('[data-nav="doj"]').hidden = true;
+  }
   const now = new Date();
   $('#month').value = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
   buildGrid();

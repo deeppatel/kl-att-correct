@@ -2,12 +2,13 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<title>Attendance Correction</title>
+<title>Update DOJ</title>
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/handsontable@13.1.0/dist/handsontable.full.min.css" />
 <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
+
 <div id="login" class="modal">
   <form id="loginForm" class="card">
     <h2>Sign in</h2>
@@ -19,23 +20,20 @@
 </div>
 
 <header id="topbar" hidden>
-  <strong>Attendance Correction</strong>
+  <strong>Update DOJ</strong>
   <span class="sep"></span>
   <nav class="page-nav">
-    <a href="/" data-nav="grid" class="active">Correction grid</a>
+    <a href="/" data-nav="grid">Correction grid</a>
     <a href="/add-attendance" data-nav="add">Add Attendance</a>
-    <a href="/update-doj" data-nav="doj">Update DOJ</a>
+    <a href="/update-doj" data-nav="doj" class="active">Update DOJ</a>
   </nav>
   <span class="sep"></span>
-  <label>Month <input type="month" id="month" /></label>
-  <label>Employee <input id="empFilter" placeholder="emp code or name" /></label>
+  <input id="empFilter" placeholder="emp code or name" />
   <button id="loadBtn">Load</button>
   <span class="sep"></span>
   <button id="saveBtn" class="primary" disabled>Save Changes (<span id="dirtyCount">0</span>)</button>
   <button id="discardBtn" disabled>Discard</button>
-  <span class="sep"></span>
   <button id="auditBtn">Audit</button>
-  <span id="draftStatus" class="draft-status"></span>
   <span class="grow"></span>
   <span id="who"></span>
   <button id="logoutBtn">Logout</button>
@@ -45,7 +43,7 @@
 
 <div id="auditModal" class="modal" hidden>
   <div class="card big">
-    <h2>Audit Log <button class="close" data-close>×</button></h2>
+    <h2>DOJ Audit Log <button class="close" data-close>×</button></h2>
     <div id="auditBody">Loading…</div>
   </div>
 </div>
@@ -53,6 +51,6 @@
 <div id="toast"></div>
 
 <script src="https://cdn.jsdelivr.net/npm/handsontable@13.1.0/dist/handsontable.full.min.js"></script>
-<script src="app.js"></script>
+<script src="update-doj.js"></script>
 </body>
 </html>

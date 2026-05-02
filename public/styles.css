@@ -24,6 +24,10 @@ main#grid { height: calc(100vh - 50px); overflow: hidden; }
 #toast.show { opacity: 1; }
 .dirty { background: #fff7c2 !important; }
 .draft-status { font-size: 12px; color: #666; margin-left: 6px; }
+.page-nav { display: inline-flex; gap: 10px; align-items: center; }
+.page-nav a { color: #1f6feb; text-decoration: none; font-size: 13px; }
+.page-nav a:hover { text-decoration: underline; }
+.page-nav a.active { color: #222; font-weight: 600; pointer-events: none; }
 .draft-status.flash { color: #1f6feb; transition: color .3s; }
 .anomaly { background: #fde2e2 !important; }
 table.audit { width: 100%; border-collapse: collapse; }

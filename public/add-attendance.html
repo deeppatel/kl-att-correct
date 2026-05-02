@@ -22,12 +22,17 @@
 <header id="topbar" hidden>
   <strong>Add Attendance Records</strong>
   <span class="sep"></span>
+  <nav class="page-nav">
+    <a href="/" data-nav="grid">Correction grid</a>
+    <a href="/add-attendance" data-nav="add" class="active">Add Attendance</a>
+    <a href="/update-doj" data-nav="doj">Update DOJ</a>
+  </nav>
+  <span class="sep"></span>
   <button id="addRowsBtn">+ 10 rows</button>
   <button id="clearBtn">Clear blanks</button>
   <span class="sep"></span>
   <button id="saveBtn" class="primary">Save All (<span id="filledCount">0</span>)</button>
   <span class="grow"></span>
-  <a id="mainLink" href="/" hidden>Correction grid →</a>
   <span id="who"></span>
   <button id="logoutBtn">Logout</button>
 </header>
