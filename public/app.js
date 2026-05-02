@@ -62,6 +62,7 @@ const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d(:[0-5]\d)?$/;
 async function init() {
   const { user, editableMonths: em } = await api('/api/me');
   if (!user) { $('#login').hidden = false; return; }
+  if (user.role === 'it-team') { location.replace('/add-attendance'); return; }
   me = user;
   editableMonths = em || [];
   $('#login').hidden = true;

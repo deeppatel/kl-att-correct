@@ -5,6 +5,13 @@ const bcrypt = require('bcryptjs');
 const mysql = require('mysql2/promise');
 const crypto = require('crypto');
 const path = require('path');
+const fs = require('fs');
+const SKIPPED_LOG = path.join(__dirname, 'logs', 'skipped-creates.log');
+fs.mkdirSync(path.dirname(SKIPPED_LOG), { recursive: true });
+function logSkipped(entry) {
+  const line = JSON.stringify({ at: new Date().toISOString(), ...entry }) + '\n';
+  fs.appendFile(SKIPPED_LOG, line, () => {});
+}
 
 const {
   PORT = 3000, SESSION_SECRET = 'dev-secret',
@@ -109,6 +116,10 @@ app.use(session({
   secret: SESSION_SECRET, resave: false, saveUninitialized: false,
   cookie: { httpOnly: true, sameSite: 'lax', maxAge: 8 * 3600 * 1000 },
 }));
+// Page routes — must come before static so we control which HTML is served
+// for the "directory-like" URLs. Static still serves CSS/JS/images normally.
+app.get('/add-attendance', (req, res) =>
+  res.sendFile(path.join(__dirname, 'public', 'add-attendance.html')));
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ---------- auth ----------
@@ -180,6 +191,62 @@ app.get('/api/attendance', requireRole('viewer','editor','admin'), async (req, r
   } catch (e) { console.error('attendance fetch:', e.message); res.status(500).json({ error: e.message }); }
 });
 
+// Create a new attendance row. Resolves emp_id from employees_dp.emp_code,
+// enforces the editable window, and writes audit entries for each non-null field.
+app.post('/api/attendance/create', requireRole('admin','it-team'), async (req, res) => {
+  const { emp_code, att_date, in_time, out_time, remarks } = req.body || {};
+  const conn = await pool.getConnection();
+  try {
+    if (!emp_code) throw new Error('emp_code required');
+    if (!att_date || !/^\d{4}-\d{2}-\d{2}$/.test(att_date)) throw new Error('att_date must be YYYY-MM-DD');
+    if (!isDateEditable(att_date)) throw new Error(`Date ${att_date} is outside the editable window`);
+    const inT  = validateTime(in_time);
+    const outT = validateTime(out_time);
+    if (inT && outT && outT <= inT) throw new Error('Out Time must be greater than In Time');
+    const note = remarks ? String(remarks).trim().slice(0, 255) : null;
+
+    await conn.beginTransaction();
+
+    // Resolve emp_id from employees_dp.emp_code (must exist and not soft-deleted).
+    const [emps] = await conn.query(
+      `SELECT id FROM employees_dp WHERE emp_code = ? AND deleted_at IS NULL LIMIT 1`,
+      [emp_code]);
+    if (!emps[0]) throw new Error(`emp_code ${emp_code} not found in employees master`);
+    const emp_id = emps[0].id;
+
+    // Reject duplicates (same employee + date already exists, not soft-deleted).
+    const [dup] = await conn.query(
+      `SELECT id FROM attendance_data WHERE emp_code = ? AND \`date\` = ? AND deleted_at IS NULL LIMIT 1`,
+      [emp_code, att_date]);
+    if (dup[0]) throw new Error(`A record for ${emp_code} on ${att_date} already exists (id ${dup[0].id})`);
+
+    const inDt  = inT  ? `${att_date} ${inT}`  : null;
+    const outDt = outT ? `${att_date} ${outT}` : null;
+
+    const [r] = await conn.query(
+      `INSERT INTO attendance_data (emp_id, emp_code, \`date\`, in_time, out_time, remarks)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [emp_id, emp_code, att_date, inDt, outDt, note]);
+    const rowId = r.insertId;
+
+    const user = req.session.user;
+    const batchId = crypto.randomUUID();
+    const audit = (field, val) => conn.query(
+      `INSERT INTO att_audit_log (row_id, field, old_value, new_value, edited_by, edited_by_name, batch_id)
+       VALUES (?, ?, NULL, ?, ?, ?, ?)`,
+      [rowId, field, val, user.id, user.full_name || user.username, batchId]);
+    if (inT)  await audit('in_time',  inT);
+    if (outT) await audit('out_time', outT);
+    if (note) await audit('remarks',  note);
+
+    await conn.commit();
+    res.json({ ok: true, id: rowId, batchId });
+  } catch (err) {
+    await conn.rollback();
+    res.status(400).json({ error: err.message });
+  } finally { conn.release(); }
+});
+
 // Batch save: [{id, field, oldValue, newValue}, ...]
 app.post('/api/attendance/save', requireRole('editor','admin'), async (req, res) => {
   const edits = Array.isArray(req.body?.edits) ? req.body.edits : [];
@@ -236,6 +303,122 @@ app.post('/api/attendance/save', requireRole('editor','admin'), async (req, res)
 });
 
 // Audit log + rollback
+// Batch create — one transaction, all-or-nothing. Skips rows with no emp_code.
+app.post('/api/attendance/create-batch', requireRole('admin','it-team'), async (req, res) => {
+  const items = Array.isArray(req.body?.items) ? req.body.items : [];
+  if (!items.length) return res.json({ ok: true, created: 0 });
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    const user = req.session.user;
+    const batchId = crypto.randomUUID();
+    let created = 0, updated = 0;
+    const skipped = []; // {row, emp_code, att_date, reason}
+    const skippedLogEntries = []; // file-flushed only after commit succeeds
+    for (let idx = 0; idx < items.length; idx++) {
+      const it = items[idx] || {};
+      if (!it.emp_code) throw new Error(`Row ${idx + 1}: emp_code is required`);
+      if (!it.att_date || !/^\d{4}-\d{2}-\d{2}$/.test(it.att_date))
+        throw new Error(`Row ${idx + 1}: date must be YYYY-MM-DD`);
+      if (!isDateEditable(it.att_date))
+        throw new Error(`Row ${idx + 1}: date ${it.att_date} is outside the editable window`);
+      const inT  = validateTime(it.in_time);
+      const outT = validateTime(it.out_time);
+      if (inT && outT && outT <= inT)
+        throw new Error(`Row ${idx + 1}: Out Time must be greater than In Time`);
+      const note = it.remarks ? String(it.remarks).trim().slice(0, 255) : null;
+
+      const [emps] = await conn.query(
+        `SELECT id, DATE_FORMAT(doj, '%Y-%m') AS doj_ym
+         FROM employees_dp WHERE emp_code = ? AND deleted_at IS NULL LIMIT 1`,
+        [it.emp_code]);
+      if (!emps[0]) throw new Error(`Row ${idx + 1}: emp_code ${it.emp_code} not in employees master`);
+      const emp_id = emps[0].id;
+      const dojYm  = emps[0].doj_ym; // 'YYYY-MM' or null
+
+      const inDt  = inT  ? `${it.att_date} ${inT}`  : null;
+      const outDt = outT ? `${it.att_date} ${outT}` : null;
+      const audit = (rowId, field, oldV, newV) => conn.query(
+        `INSERT INTO att_audit_log (row_id, field, old_value, new_value, edited_by, edited_by_name, batch_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [rowId, field, oldV, newV, user.id, user.full_name || user.username, batchId]);
+
+      // Duplicate check on (emp_code, date).
+      const [dup] = await conn.query(
+        `SELECT id,
+                TIME_FORMAT(in_time,'%H:%i:%s')  AS in_time,
+                TIME_FORMAT(out_time,'%H:%i:%s') AS out_time,
+                remarks
+         FROM attendance_data WHERE emp_code = ? AND \`date\` = ? AND deleted_at IS NULL LIMIT 1`,
+        [it.emp_code, it.att_date]);
+
+      if (dup[0]) {
+        const attYm = it.att_date.slice(0, 7);
+        if (dojYm && dojYm === attYm) {
+          // Same DOJ month → overwrite the existing row's editable fields with audit.
+          const cur = dup[0];
+          const rowId = cur.id;
+          if (inT  !== null && inT  !== cur.in_time)  { await conn.query(`UPDATE attendance_data SET in_time=?  WHERE id=?`, [inDt,  rowId]); await audit(rowId, 'in_time',  cur.in_time,  inT);  }
+          if (outT !== null && outT !== cur.out_time) { await conn.query(`UPDATE attendance_data SET out_time=? WHERE id=?`, [outDt, rowId]); await audit(rowId, 'out_time', cur.out_time, outT); }
+          if (note !== null && note !== cur.remarks)  { await conn.query(`UPDATE attendance_data SET remarks=?  WHERE id=?`, [note,  rowId]); await audit(rowId, 'remarks',  cur.remarks,  note); }
+          updated++;
+        } else {
+          const reason = dojYm
+            ? `existing row id ${dup[0].id}; DOJ ${dojYm} differs from attendance month ${attYm}`
+            : `existing row id ${dup[0].id}; employee has no DOJ on file`;
+          skipped.push({ row: idx + 1, emp_code: it.emp_code, att_date: it.att_date, reason });
+          skippedLogEntries.push({ user: user.username, emp_code: it.emp_code, att_date: it.att_date, doj_ym: dojYm, existing_id: dup[0].id, reason });
+        }
+        continue;
+      }
+
+      // Fresh insert.
+      const [r] = await conn.query(
+        `INSERT INTO attendance_data (emp_id, emp_code, \`date\`, in_time, out_time, remarks)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+        [emp_id, it.emp_code, it.att_date, inDt, outDt, note]);
+      const rowId = r.insertId;
+      if (inT)  await audit(rowId, 'in_time',  null, inT);
+      if (outT) await audit(rowId, 'out_time', null, outT);
+      if (note) await audit(rowId, 'remarks',  null, note);
+      created++;
+    }
+    await conn.commit();
+    skippedLogEntries.forEach(logSkipped);
+    res.json({ ok: true, created, updated, skipped, batchId });
+  } catch (err) {
+    await conn.rollback();
+    res.status(400).json({ error: err.message });
+  } finally { conn.release(); }
+});
+
+// Resolve emp_code → name (or 404). Used by the add-attendance grid for inline name display.
+app.get('/api/employees/by-code', requireRole('admin','it-team'), async (req, res) => {
+  try {
+    const code = (req.query.code || '').trim();
+    if (!code) return res.json({ rows: [] });
+    const [rows] = await pool.query(
+      `SELECT emp_code, CONCAT_WS(' ', first_name, last_name) AS name
+       FROM employees_dp WHERE emp_code = ? AND deleted_at IS NULL LIMIT 1`, [code]);
+    res.json({ row: rows[0] || null });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Lightweight employee lookup for the Add Record dialog. Searches emp_code or name.
+app.get('/api/employees/search', requireRole('admin','it-team'), async (req, res) => {
+  try {
+    const q = (req.query.q || '').trim();
+    if (!q) return res.json({ rows: [] });
+    const [rows] = await pool.query(
+      `SELECT emp_code, CONCAT_WS(' ', first_name, last_name) AS name
+       FROM employees_dp
+       WHERE deleted_at IS NULL AND (emp_code LIKE ? OR first_name LIKE ? OR last_name LIKE ?)
+       ORDER BY emp_code LIMIT 20`,
+      [`%${q}%`, `%${q}%`, `%${q}%`]);
+    res.json({ rows });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 app.get('/api/audit', requireRole('viewer','editor','admin'), async (req, res) => {
   const { limit = 500, month } = req.query;
   const where = []; const params = [];

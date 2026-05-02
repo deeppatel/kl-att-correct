@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Add Attendance Records</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/handsontable@13.1.0/dist/handsontable.full.min.css" />
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<div id="login" class="modal">
+  <form id="loginForm" class="card">
+    <h2>Sign in</h2>
+    <input name="username" placeholder="Username" autocomplete="username" required />
+    <input name="password" type="password" placeholder="Password" autocomplete="current-password" required />
+    <button type="submit">Sign in</button>
+    <p class="hint" id="loginErr"></p>
+  </form>
+</div>
+
+<header id="topbar" hidden>
+  <strong>Add Attendance Records</strong>
+  <span class="sep"></span>
+  <button id="addRowsBtn">+ 10 rows</button>
+  <button id="clearBtn">Clear blanks</button>
+  <span class="sep"></span>
+  <button id="saveBtn" class="primary">Save All (<span id="filledCount">0</span>)</button>
+  <span class="grow"></span>
+  <a id="mainLink" href="/" hidden>Correction grid →</a>
+  <span id="who"></span>
+  <button id="logoutBtn">Logout</button>
+</header>
+
+<main id="grid" hidden></main>
+
+<div id="toast"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/handsontable@13.1.0/dist/handsontable.full.min.js"></script>
+<script src="add-attendance.js"></script>
+</body>
+</html>
