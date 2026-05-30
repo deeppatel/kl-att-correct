@@ -90,6 +90,17 @@ function validateTime(v) {
   const s = String(v).trim();
   return s.length === 5 ? s + ':00' : s;
 }
+// Compute attendance duration as TIME ('HH:MM:SS') from two 'HH:MM:SS' strings.
+// Returns null if either side is missing or out <= in.
+function computeDuration(inT, outT) {
+  if (!inT || !outT) return null;
+  const toS = (t) => { const [h, m, s = 0] = t.split(':').map(Number); return h * 3600 + m * 60 + s; };
+  const diff = toS(outT) - toS(inT);
+  if (diff <= 0) return null;
+  const h = Math.floor(diff / 3600), m = Math.floor((diff % 3600) / 60), s = diff % 60;
+  return [h, m, s].map(n => String(n).padStart(2, '0')).join(':');
+}
+
 // A row's date is editable iff it's in the current month, OR in the previous
 // month AND today is between the 1st and 7th (inclusive).
 function isDateEditable(yyyyMmDd, now = new Date()) {
@@ -122,6 +133,8 @@ app.get('/add-attendance', (req, res) =>
   res.sendFile(path.join(__dirname, 'public', 'add-attendance.html')));
 app.get('/update-doj', (req, res) =>
   res.sendFile(path.join(__dirname, 'public', 'update-doj.html')));
+app.get('/changes-report', (req, res) =>
+  res.sendFile(path.join(__dirname, 'public', 'changes-report.html')));
 app.use(express.static(path.join(__dirname, 'public')));
 
 // ---------- auth ----------
@@ -294,6 +307,14 @@ app.post('/api/attendance/save', requireRole('editor','admin'), async (req, res)
           `INSERT INTO att_audit_log (row_id, field, old_value, new_value, edited_by, edited_by_name, batch_id)
            VALUES (?,?,?,?,?,?,?)`,
           [e.id, field, e.oldValue ?? null, logVal, user.id, user.full_name || user.username, batchId]);
+
+        // Recompute duration whenever in_time or out_time was changed.
+        if (field === 'in_time' || field === 'out_time') {
+          const projIn  = field === 'in_time'  ? validateTime(e.newValue) : cur.in_time;
+          const projOut = field === 'out_time' ? validateTime(e.newValue) : cur.out_time;
+          const newDur = computeDuration(projIn, projOut);
+          await conn.query(`UPDATE attendance_data SET duration=? WHERE id=?`, [newDur, e.id]);
+        }
       }
     }
     await conn.commit();
@@ -360,9 +381,14 @@ app.post('/api/attendance/create-batch', requireRole('admin','it-team'), async (
           // Same DOJ month → overwrite the existing row's editable fields with audit.
           const cur = dup[0];
           const rowId = cur.id;
-          if (inT  !== null && inT  !== cur.in_time)  { await conn.query(`UPDATE attendance_data SET in_time=?  WHERE id=?`, [inDt,  rowId]); await audit(rowId, 'in_time',  cur.in_time,  inT);  }
-          if (outT !== null && outT !== cur.out_time) { await conn.query(`UPDATE attendance_data SET out_time=? WHERE id=?`, [outDt, rowId]); await audit(rowId, 'out_time', cur.out_time, outT); }
+          let inChanged = false, outChanged = false;
+          let projIn = cur.in_time, projOut = cur.out_time;
+          if (inT  !== null && inT  !== cur.in_time)  { await conn.query(`UPDATE attendance_data SET in_time=?  WHERE id=?`, [inDt,  rowId]); await audit(rowId, 'in_time',  cur.in_time,  inT);  inChanged = true; projIn = inT; }
+          if (outT !== null && outT !== cur.out_time) { await conn.query(`UPDATE attendance_data SET out_time=? WHERE id=?`, [outDt, rowId]); await audit(rowId, 'out_time', cur.out_time, outT); outChanged = true; projOut = outT; }
           if (note !== null && note !== cur.remarks)  { await conn.query(`UPDATE attendance_data SET remarks=?  WHERE id=?`, [note,  rowId]); await audit(rowId, 'remarks',  cur.remarks,  note); }
+          if (inChanged || outChanged) {
+            await conn.query(`UPDATE attendance_data SET duration=? WHERE id=?`, [computeDuration(projIn, projOut), rowId]);
+          }
           updated++;
         } else {
           const reason = dojYm
@@ -374,11 +400,12 @@ app.post('/api/attendance/create-batch', requireRole('admin','it-team'), async (
         continue;
       }
 
-      // Fresh insert.
+      // Fresh insert (compute duration from supplied times).
+      const dur = computeDuration(inT, outT);
       const [r] = await conn.query(
-        `INSERT INTO attendance_data (emp_id, emp_code, \`date\`, in_time, out_time, remarks)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-        [emp_id, it.emp_code, it.att_date, inDt, outDt, note]);
+        `INSERT INTO attendance_data (emp_id, emp_code, \`date\`, in_time, out_time, duration, remarks)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [emp_id, it.emp_code, it.att_date, inDt, outDt, dur, note]);
       const rowId = r.insertId;
       if (inT)  await audit(rowId, 'in_time',  null, inT);
       if (outT) await audit(rowId, 'out_time', null, outT);
@@ -392,6 +419,66 @@ app.post('/api/attendance/create-batch', requireRole('admin','it-team'), async (
     await conn.rollback();
     res.status(400).json({ error: err.message });
   } finally { conn.release(); }
+});
+
+// Attendance changes report. Pairs in_time/out_time audit entries per
+// (batch_id, row_id) and computes old/new duration on the fly.
+// Note: when a row has been edited across multiple batches, the "unchanged"
+// side is filled from the row's current value — so the displayed old/new
+// times for older batches reflect the *delta of that batch*, not a perfect
+// historical snapshot of the row at that moment.
+app.get('/api/changes-report', requireRole('viewer','editor','admin','it-team'), async (req, res) => {
+  try {
+    const { month, employee, limit = 1000 } = req.query;
+    const where = ["l.field IN ('in_time','out_time')"];
+    const params = [];
+    if (month && /^\d{4}-\d{2}$/.test(month)) {
+      where.push("DATE_FORMAT(a.`date`, '%Y-%m') = ?"); params.push(month);
+    }
+    if (employee) {
+      where.push("(a.emp_code LIKE ? OR CONCAT_WS(' ', e.first_name, e.last_name) LIKE ?)");
+      params.push(`%${employee}%`, `%${employee}%`);
+    }
+    const sql = `
+      SELECT
+        l.batch_id, l.row_id, l.rolled_back,
+        a.emp_code,
+        CONCAT_WS(' ', e.first_name, e.last_name) AS emp_name,
+        DATE_FORMAT(a.\`date\`, '%Y-%m-%d') AS att_date,
+        TIME_FORMAT(a.in_time,  '%H:%i:%s') AS cur_in,
+        TIME_FORMAT(a.out_time, '%H:%i:%s') AS cur_out,
+        MAX(CASE WHEN l.field='in_time'  THEN l.old_value END) AS old_in_change,
+        MAX(CASE WHEN l.field='in_time'  THEN l.new_value END) AS new_in_change,
+        MAX(CASE WHEN l.field='out_time' THEN l.old_value END) AS old_out_change,
+        MAX(CASE WHEN l.field='out_time' THEN l.new_value END) AS new_out_change,
+        MIN(l.edited_at) AS changed_at,
+        MAX(l.edited_by_name) AS changed_by
+      FROM att_audit_log l
+      JOIN attendance_data a ON a.id = l.row_id
+      LEFT JOIN employees_dp e ON e.emp_code = a.emp_code AND e.deleted_at IS NULL
+      WHERE ${where.join(' AND ')}
+      GROUP BY l.batch_id, l.row_id, l.rolled_back, a.emp_code, emp_name, a.\`date\`, a.in_time, a.out_time
+      ORDER BY changed_at DESC
+      LIMIT ?`;
+    params.push(+limit);
+    const [rows] = await pool.query(sql, params);
+    const out = rows.map(r => {
+      const old_in  = r.old_in_change  ?? r.cur_in;
+      const new_in  = r.new_in_change  ?? r.cur_in;
+      const old_out = r.old_out_change ?? r.cur_out;
+      const new_out = r.new_out_change ?? r.cur_out;
+      return {
+        batch_id: r.batch_id, row_id: r.row_id, rolled_back: !!r.rolled_back,
+        emp_code: r.emp_code, emp_name: r.emp_name, att_date: r.att_date,
+        old_in, old_out, new_in, new_out,
+        old_duration: computeDuration(old_in, old_out),
+        new_duration: computeDuration(new_in, new_out),
+        changed_by: r.changed_by,
+        changed_at: r.changed_at,
+      };
+    });
+    res.json({ rows: out });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ---------- employees grid (DOJ update) ----------
@@ -539,6 +626,14 @@ app.post('/api/audit/rollback', requireRole('admin'), async (req, res) => {
         restored = (row && l.old_value) ? `${row.d} ${l.old_value}` : null;
       }
       await conn.query(`UPDATE attendance_data SET \`${l.field}\`=? WHERE id=?`, [restored, l.row_id]);
+      if (l.field === 'in_time' || l.field === 'out_time') {
+        const [[cur]] = await conn.query(
+          `SELECT TIME_FORMAT(in_time,'%H:%i:%s') AS in_time,
+                  TIME_FORMAT(out_time,'%H:%i:%s') AS out_time
+           FROM attendance_data WHERE id=?`, [l.row_id]);
+        await conn.query(`UPDATE attendance_data SET duration=? WHERE id=?`,
+          [computeDuration(cur.in_time, cur.out_time), l.row_id]);
+      }
       await conn.query(`UPDATE att_audit_log SET rolled_back=1 WHERE id=?`, [l.id]);
     }
     await conn.commit();

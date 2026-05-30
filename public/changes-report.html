@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Changes Report</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<link rel="stylesheet" href="styles.css" />
+<style>
+  table.report { border-collapse: collapse; width: 100%; font-size: 12px; }
+  table.report th, table.report td { border-bottom: 1px solid #eee; padding: 6px 10px; text-align: left; white-space: nowrap; }
+  table.report thead th { background: #f5f5f5; position: sticky; top: 0; }
+  table.report tr.rb td { color: #999; text-decoration: line-through; }
+  .delta { color: #1f6feb; font-weight: 600; }
+  #reportWrap { height: calc(100vh - 50px); overflow: auto; padding: 0 12px 12px; }
+</style>
+</head>
+<body>
+
+<div id="login" class="modal">
+  <form id="loginForm" class="card">
+    <h2>Sign in</h2>
+    <input name="username" placeholder="Username" autocomplete="username" required />
+    <input name="password" type="password" placeholder="Password" autocomplete="current-password" required />
+    <button type="submit">Sign in</button>
+    <p class="hint" id="loginErr"></p>
+  </form>
+</div>
+
+<header id="topbar" hidden>
+  <strong>Changes Report</strong>
+  <span class="sep"></span>
+  <nav class="page-nav">
+    <a href="/" data-nav="grid">Correction grid</a>
+    <a href="/add-attendance" data-nav="add">Add Attendance</a>
+    <a href="/update-doj" data-nav="doj">Update DOJ</a>
+    <a href="/changes-report" data-nav="report" class="active">Changes Report</a>
+  </nav>
+  <span class="sep"></span>
+  <label>Month <input type="month" id="month" /></label>
+  <label>Employee <input id="empFilter" placeholder="emp code or name" /></label>
+  <button id="loadBtn">Load</button>
+  <button id="csvBtn">Export CSV</button>
+  <span class="grow"></span>
+  <span id="who"></span>
+  <button id="logoutBtn">Logout</button>
+</header>
+
+<main id="reportWrap" hidden>
+  <table class="report" id="report">
+    <thead>
+      <tr>
+        <th>Emp Code</th><th>Name</th><th>Date</th>
+        <th>Old In</th><th>Old Out</th><th>Old Duration</th>
+        <th>New In</th><th>New Out</th><th>New Duration</th>
+        <th>Changed By</th><th>When</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+</main>
+
+<div id="toast"></div>
+<script src="changes-report.js"></script>
+</body>
+</html>
