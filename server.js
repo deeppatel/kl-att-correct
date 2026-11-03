@@ -377,8 +377,11 @@ app.post('/api/attendance/create-batch', requireRole('admin','it-team'), async (
 
       if (dup[0]) {
         const attYm = it.att_date.slice(0, 7);
-        if (dojYm && dojYm === attYm) {
-          // Same DOJ month → overwrite the existing row's editable fields with audit.
+        // Allow update if the existing row is a biometric-sync skeleton
+        // (both in_time and out_time are NULL) — IT treats it as a fresh entry.
+        const isEmptyRow = dup[0].in_time == null && dup[0].out_time == null;
+        if (isEmptyRow || (dojYm && dojYm === attYm)) {
+          // Overwrite the existing row's editable fields with audit.
           const cur = dup[0];
           const rowId = cur.id;
           let inChanged = false, outChanged = false;
