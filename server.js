@@ -376,30 +376,46 @@ app.post('/api/attendance/create-batch', requireRole('admin','it-team'), async (
         [it.emp_code, it.att_date]);
 
       if (dup[0]) {
+        const cur = dup[0];
+        const rowId = cur.id;
         const attYm = it.att_date.slice(0, 7);
-        // Allow update if the existing row is a biometric-sync skeleton
-        // (both in_time and out_time are NULL) — IT treats it as a fresh entry.
-        const isEmptyRow = dup[0].in_time == null && dup[0].out_time == null;
-        if (isEmptyRow || (dojYm && dojYm === attYm)) {
-          // Overwrite the existing row's editable fields with audit.
-          const cur = dup[0];
-          const rowId = cur.id;
-          let inChanged = false, outChanged = false;
+        const sameDojMonth = dojYm && dojYm === attYm;
+        const overrideDoj  = process.env.OVERRIDE_DOJ === '1';
+        const canOverwrite = sameDojMonth || overrideDoj; // free to change non-NULL fields
+
+        // Per-field decision:
+        //   - fill a NULL cell → always allowed (biometric missed a punch)
+        //   - overwrite a non-NULL cell → only with canOverwrite
+        const actions = [];       // {field, oldVal, newVal, writeVal}
+        const blocks  = [];       // human-readable per-field reasons
+        const consider = (field, newVal, writeVal) => {
+          const cv = cur[field];
+          if (newVal === null || newVal === cv) return;
+          if (cv == null || canOverwrite) actions.push({ field, oldVal: cv, newVal, writeVal });
+          else blocks.push(`${field} already set to ${cv}`);
+        };
+        consider('in_time',  inT,  inDt);
+        consider('out_time', outT, outDt);
+        consider('remarks',  note, note);
+
+        if (blocks.length) {
+          const reason = `${blocks.join('; ')} (existing row ${rowId}; DOJ ${dojYm || 'unknown'} vs attendance ${attYm})`;
+          skipped.push({ row: idx + 1, emp_code: it.emp_code, att_date: it.att_date, reason });
+          skippedLogEntries.push({ user: user.username, emp_code: it.emp_code, att_date: it.att_date, doj_ym: dojYm, existing_id: rowId, reason });
+        } else if (actions.length) {
           let projIn = cur.in_time, projOut = cur.out_time;
-          if (inT  !== null && inT  !== cur.in_time)  { await conn.query(`UPDATE attendance_data SET in_time=?  WHERE id=?`, [inDt,  rowId]); await audit(rowId, 'in_time',  cur.in_time,  inT);  inChanged = true; projIn = inT; }
-          if (outT !== null && outT !== cur.out_time) { await conn.query(`UPDATE attendance_data SET out_time=? WHERE id=?`, [outDt, rowId]); await audit(rowId, 'out_time', cur.out_time, outT); outChanged = true; projOut = outT; }
-          if (note !== null && note !== cur.remarks)  { await conn.query(`UPDATE attendance_data SET remarks=?  WHERE id=?`, [note,  rowId]); await audit(rowId, 'remarks',  cur.remarks,  note); }
-          if (inChanged || outChanged) {
+          for (const a of actions) {
+            await conn.query(`UPDATE attendance_data SET \`${a.field}\`=? WHERE id=?`, [a.writeVal, rowId]);
+            await audit(rowId, a.field, a.oldVal, a.newVal);
+            if (a.field === 'in_time')  projIn  = a.newVal;
+            if (a.field === 'out_time') projOut = a.newVal;
+          }
+          if (actions.some(a => a.field === 'in_time' || a.field === 'out_time')) {
             await conn.query(`UPDATE attendance_data SET duration=? WHERE id=?`, [computeDuration(projIn, projOut), rowId]);
           }
           updated++;
-        } else {
-          const reason = dojYm
-            ? `existing row id ${dup[0].id}; DOJ ${dojYm} differs from attendance month ${attYm}`
-            : `existing row id ${dup[0].id}; employee has no DOJ on file`;
-          skipped.push({ row: idx + 1, emp_code: it.emp_code, att_date: it.att_date, reason });
-          skippedLogEntries.push({ user: user.username, emp_code: it.emp_code, att_date: it.att_date, doj_ym: dojYm, existing_id: dup[0].id, reason });
         }
+        // else: nothing to do — all requested values already match the row.
         continue;
       }
 
@@ -664,5 +680,7 @@ app.post('/api/users', requireRole('admin'), async (req, res) => {
 
 (async () => {
   await detectEmployeeMaster();
+  if (process.env.OVERRIDE_DOJ === '1')
+    console.log('OVERRIDE_DOJ=1 — Add-Attendance may overwrite any existing field, DOJ check disabled');
   app.listen(PORT, () => console.log(`att_correction listening on http://localhost:${PORT}`));
 })();
